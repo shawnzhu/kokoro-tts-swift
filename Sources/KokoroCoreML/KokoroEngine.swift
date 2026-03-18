@@ -569,8 +569,74 @@ public final class KokoroEngine: @unchecked Sendable {
             validSamples = audio.count
         }
 
-        let samples = MLArrayHelpers.extractFloats(from: audio, maxCount: validSamples)
+        var samples = MLArrayHelpers.extractFloats(from: audio, maxCount: validSamples)
+        Self.removeTailArtifact(&samples)
         return (samples, durations)
+    }
+
+    /// Remove spurious spike artifacts from the tail of synthesized audio.
+    ///
+    /// The CoreML model sometimes produces a brief burst of energy ~40ms from
+    /// the end of the output, after speech has decayed to near-silence. This
+    /// manifests as an audible click. Detection: scan the last 100ms in 1ms
+    /// RMS windows, find the last spike (RMS > threshold), then check if
+    /// there's a quiet gap before it. If so, zero from the gap onwards.
+    private static func removeTailArtifact(_ samples: inout [Float]) {
+        let tailLength = min(samples.count, Int(0.1 * Float(sampleRate)))  // last 100ms
+        let window = sampleRate / 1000  // 1ms = 24 samples
+        let tailStart = samples.count - tailLength
+
+        // Build RMS profile of the tail in 1ms windows
+        var rmsWindows: [(index: Int, rms: Float)] = []
+        var i = tailStart
+        while i + window <= samples.count {
+            var sum: Float = 0
+            for j in i..<(i + window) {
+                sum += samples[j] * samples[j]
+            }
+            let rms = (sum / Float(window)).squareRoot()
+            rmsWindows.append((i, rms))
+            i += window
+        }
+
+        guard !rmsWindows.isEmpty else { return }
+
+        // Find last spike (RMS > 0.0015) scanning backwards
+        // 0.0015 in float ≈ 50 in int16 scale (50/32767)
+        let spikeThreshold: Float = 0.0015
+        let quietThreshold: Float = 0.0006
+
+        var spikeIdx: Int?
+        for idx in stride(from: rmsWindows.count - 1, through: 0, by: -1) {
+            if rmsWindows[idx].rms > spikeThreshold {
+                spikeIdx = idx
+                break
+            }
+        }
+
+        guard let spike = spikeIdx else { return }
+
+        // Find quiet gap before the spike
+        var gapIdx: Int?
+        for idx in stride(from: spike, through: 0, by: -1) {
+            if rmsWindows[idx].rms < quietThreshold {
+                gapIdx = idx
+                break
+            }
+        }
+
+        guard let gap = gapIdx else { return }
+
+        // Zero from the gap onwards with a 2ms fade
+        let zeroFrom = rmsWindows[gap].index
+        let fadeLen = 2 * window  // 2ms
+        for j in zeroFrom..<min(zeroFrom + fadeLen, samples.count) {
+            let progress = Float(j - zeroFrom) / Float(fadeLen)
+            samples[j] *= (1.0 - progress)
+        }
+        for j in (zeroFrom + fadeLen)..<samples.count {
+            samples[j] = 0
+        }
     }
 
     // MARK: - Streaming
