@@ -103,9 +103,57 @@ section {
   pointer-events: none;
 }
 
-.hero-glyph {
-  margin-bottom: 2rem;
+button.hero-glyph {
+  display: block;
+  margin: 0 auto 2rem;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
   position: relative;
+  transition: transform 0.2s ease;
+}
+
+button.hero-glyph:hover {
+  transform: scale(1.05);
+}
+
+button.hero-glyph:active {
+  transform: scale(0.98);
+}
+
+button.hero-glyph:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 8px;
+  border-radius: 50%;
+}
+
+button.hero-glyph.playing svg {
+  animation: glyph-spin 4s linear infinite;
+}
+
+@keyframes glyph-spin {
+  0%   { filter: drop-shadow(0 0 35px rgba(196, 181, 253, 0.5)); }
+  33%  { filter: drop-shadow(0 0 50px rgba(129, 140, 248, 0.6)); }
+  66%  { filter: drop-shadow(0 0 50px rgba(103, 232, 249, 0.5)); }
+  100% { filter: drop-shadow(0 0 35px rgba(196, 181, 253, 0.5)); }
+}
+
+.hero-glyph-hint {
+  display: block;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 0.5rem;
+  transition: color 0.2s ease;
+}
+
+button.hero-glyph:hover .hero-glyph-hint {
+  color: var(--accent);
+}
+
+button.hero-glyph.playing .hero-glyph-hint {
+  color: var(--accent);
 }
 
 .hero-glyph svg {
@@ -160,6 +208,7 @@ section {
   margin-left: auto;
   margin-right: auto;
 }
+
 
 .hero-actions {
   display: flex;

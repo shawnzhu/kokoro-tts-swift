@@ -15,7 +15,7 @@
   <!-- Hero -->
   <section class="hero">
     <div class="container">
-      <div class="hero-glyph" aria-hidden="true">
+      <button class="hero-glyph" id="hero-play" aria-label="Listen to kokoro demo">
         <svg viewBox="0 0 120 120" width="120" height="120">
           <circle cx="60" cy="60" r="56" fill="none" stroke="url(#glow)" stroke-width="1.5"/>
           <circle cx="60" cy="60" r="38" fill="none" stroke="url(#glow)" stroke-width="1" opacity="0.5"/>
@@ -39,7 +39,8 @@
             </linearGradient>
           </defs>
         </svg>
-      </div>
+        <span class="hero-glyph-hint">hear it</span>
+      </button>
       <h1>kokoro</h1>
       <p class="tagline">give your agent a voice.</p>
       <p class="sub-tagline">on-device text-to-speech for Swift. 54 voices. CoreML on Apple Silicon. no cloud. no MLX.</p>
@@ -188,6 +189,34 @@
     </div>
   </section>
 
+  <!-- CLI -->
+  <section class="cli">
+    <div class="container">
+      <h2>the command line</h2>
+      <p class="section-desc">speech from your terminal. pipe it, script it, alias it.</p>
+      <div class="terminal">
+        <div class="terminal-bar"><span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span></div>
+        <div class="terminal-body">
+          <pre><code><span class="prompt">$</span> kokoro say <span class="str">"your deploy is live"</span>
+
+<span class="prompt">$</span> kokoro say -v am_adam -s 1.3 <span class="str">"moving fast"</span>
+
+<span class="prompt">$</span> kokoro say --stream <span class="str">"start talking before I finish thinking"</span>
+
+<span class="prompt">$</span> echo <span class="str">"long document contents"</span> | kokoro say --stream
+
+<span class="prompt">$</span> kokoro say -o briefing.wav <span class="str">"save this for later"</span>
+
+<span class="prompt">$</span> kokoro say --list-voices
+af_alloy    af_aoede    af_bella    af_heart    af_jessica  ...
+
+<span class="prompt">$</span> kokoro daemon start
+<span class="cm"># models stay warm — subsequent calls are 3x faster</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- Code -->
   <section class="code-section">
     <div class="container">
@@ -280,34 +309,6 @@
         <div class="usecase-card">
           <h3>CLI tools</h3>
           <p><code>kokoro say "deploy complete"</code> — pipe text in, get audio out. works from any script.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- CLI -->
-  <section class="cli">
-    <div class="container">
-      <h2>the command line</h2>
-      <p class="section-desc">speech from your terminal. pipe it, script it, alias it.</p>
-      <div class="terminal">
-        <div class="terminal-bar"><span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span></div>
-        <div class="terminal-body">
-          <pre><code><span class="prompt">$</span> kokoro say <span class="str">"your deploy is live"</span>
-
-<span class="prompt">$</span> kokoro say -v am_adam -s 1.3 <span class="str">"moving fast"</span>
-
-<span class="prompt">$</span> kokoro say --stream <span class="str">"start talking before I finish thinking"</span>
-
-<span class="prompt">$</span> echo <span class="str">"long document contents"</span> | kokoro say --stream
-
-<span class="prompt">$</span> kokoro say -o briefing.wav <span class="str">"save this for later"</span>
-
-<span class="prompt">$</span> kokoro say --list-voices
-af_alloy    af_aoede    af_bella    af_heart    af_jessica  ...
-
-<span class="prompt">$</span> kokoro daemon start
-<span class="cm"># models stay warm — subsequent calls are 3x faster</span></code></pre>
         </div>
       </div>
     </div>
@@ -414,6 +415,40 @@ kokoro say <span class="str">"instant response"</span></code></pre>
             current = null;
           });
           audio.play();
+        });
+      });
+    })();
+
+    // Hero play button
+    (function() {
+      var btn = document.getElementById('hero-play');
+      var audio = null;
+      btn.addEventListener('click', function() {
+        if (audio && !audio.paused) {
+          audio.pause();
+          audio.currentTime = 0;
+          btn.classList.remove('playing');
+          btn.querySelector('.hero-glyph-hint').textContent = 'hear it';
+          return;
+        }
+        audio = new Audio('samples/hero.mp3');
+        btn.classList.add('playing');
+        btn.querySelector('.hero-glyph-hint').textContent = 'playing';
+        audio.addEventListener('ended', function() {
+          btn.classList.remove('playing');
+          btn.querySelector('.hero-glyph-hint').textContent = 'hear it';
+        });
+        audio.addEventListener('error', function(e) {
+          console.error('Audio error:', e);
+          btn.classList.remove('playing');
+          btn.querySelector('.hero-glyph-hint').textContent = 'error';
+        });
+        audio.play().then(function() {
+          console.log('Playing hero audio');
+        }).catch(function(e) {
+          console.error('Play failed:', e);
+          btn.classList.remove('playing');
+          btn.querySelector('.hero-glyph-hint').textContent = 'hear it';
         });
       });
     })();
