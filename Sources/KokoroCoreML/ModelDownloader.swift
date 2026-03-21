@@ -131,5 +131,15 @@ enum ModelDownloader {
         #endif
 
         writeInstalledTag(tag, at: directory)
+
+        // Clean up legacy bucket models (replaced by dynamic kokoro_frontend/backend)
+        let legacyPrefixes = [
+            "kokoro_21_5s_", "kokoro_24_10s_", "kokoro_25_20s_",
+        ]
+        if let contents = try? fm.contentsOfDirectory(atPath: directory.path) {
+            for name in contents where legacyPrefixes.contains(where: { name.hasPrefix($0) }) {
+                try? fm.removeItem(at: directory.appendingPathComponent(name))
+            }
+        }
     }
 }
