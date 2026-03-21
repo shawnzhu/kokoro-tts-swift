@@ -1,16 +1,8 @@
 import Foundation
 
 /// Validates CoreML model presence for KokoroCoreML.
-///
-/// Models are stored at a fixed path so CoreML preserves its
-/// device-specialized compilation cache across launches.
 enum ModelManager {
     /// Suggested model directory for an application.
-    ///
-    /// Returns `~/Library/Application Support/<bundleIdentifier>/models/kokoro/`.
-    ///
-    /// - Parameter bundleIdentifier: The app's bundle ID. Defaults to
-    ///   `Bundle.main.bundleIdentifier`, falling back to `"kokoro-coreml"`.
     static func defaultDirectory(
         for bundleIdentifier: String = Bundle.main.bundleIdentifier ?? "kokoro-coreml"
     ) -> URL {
@@ -24,23 +16,19 @@ enum ModelManager {
             .appendingPathComponent("kokoro")
     }
 
-    /// Check whether enough models exist to run inference.
+    /// Check whether models exist to run inference.
     ///
-    /// Requires at least one frontend+backend `.mlmodelc` pair and a `voices/` directory.
+    /// Requires `kokoro_frontend.mlmodelc`, `kokoro_backend.mlmodelc`,
+    /// and a `voices/` directory.
     static func modelsAvailable(at directory: URL) -> Bool {
         let fm = FileManager.default
-        let hasModel = ModelBucket.allCases.contains { bucket in
+        let hasModels =
             fm.fileExists(
-                atPath: directory.appendingPathComponent(
-                    bucket.frontendModelName + ".mlmodelc"
-                ).path)
-                && fm.fileExists(
-                    atPath: directory.appendingPathComponent(
-                        bucket.backendModelName + ".mlmodelc"
-                    ).path)
-        }
+                atPath: directory.appendingPathComponent("kokoro_frontend.mlmodelc").path)
+            && fm.fileExists(
+                atPath: directory.appendingPathComponent("kokoro_backend.mlmodelc").path)
         let hasVoices = fm.fileExists(
             atPath: directory.appendingPathComponent("voices").path)
-        return hasModel && hasVoices
+        return hasModels && hasVoices
     }
 }

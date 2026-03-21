@@ -35,21 +35,16 @@ enum MLArrayHelpers {
         }
     }
 
-    /// Fill pre-allocated input_ids and attention_mask MLMultiArrays from token IDs.
+    /// Fill input_ids and attention_mask MLMultiArrays from token IDs.
     static func fillTokenInputs(
         from tokenIds: [Int], into inputIds: MLMultiArray, mask: MLMultiArray, maxLength: Int
     ) {
         let n = min(tokenIds.count, maxLength)
         let inputPtr = inputIds.dataPointer.assumingMemoryBound(to: Int32.self)
         let maskPtr = mask.dataPointer.assumingMemoryBound(to: Int32.self)
-        for i in 0..<maxLength {
-            if i < n {
-                inputPtr[i] = Int32(tokenIds[i])
-                maskPtr[i] = 1
-            } else {
-                inputPtr[i] = 0
-                maskPtr[i] = 0
-            }
+        for i in 0..<n {
+            inputPtr[i] = Int32(tokenIds[i])
+            maskPtr[i] = 1
         }
     }
 }

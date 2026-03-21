@@ -147,7 +147,7 @@ struct Daemon: ParsableCommand {
                 let thread = Thread {
                     handleClient(fd: clientFd, engine: engine)
                 }
-                thread.stackSize = 2 * 1024 * 1024
+                thread.stackSize = 8 * 1024 * 1024
                 thread.start()
             }
 

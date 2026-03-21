@@ -81,7 +81,7 @@ struct Say: AsyncParsableCommand {
                         cont.resume(throwing: error)
                     }
                 }
-                thread.stackSize = 2 * 1024 * 1024  // CoreML prediction needs ~1.5MB stack
+                thread.stackSize = 8 * 1024 * 1024  // CoreML prediction needs deep stacks
                 thread.start()
             }
         }
