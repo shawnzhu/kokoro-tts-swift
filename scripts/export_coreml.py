@@ -861,6 +861,25 @@ def export_dynamic(pipeline, model, set_phases_fn, output_dir,
     return fe_model, be_model
 
 
+def _export_palettized(output_dir):
+    """Create 8-bit palettized copies of the dynamic models for quality tracking."""
+    import coremltools.optimize.coreml as cto
+    config = cto.OptimizationConfig(global_config=cto.OpPalettizerConfig(nbits=8))
+
+    for name in ["kokoro_frontend", "kokoro_backend"]:
+        src = os.path.join(output_dir, f"{name}.mlpackage")
+        dst = os.path.join(output_dir, f"{name}_pal8.mlpackage")
+        if not os.path.exists(src):
+            continue
+        print(f"  Palettizing {name} (8-bit)...")
+        model = ct.models.MLModel(src)
+        quantized = cto.palettize_weights(model, config)
+        quantized.save(dst)
+        src_size = os.path.getsize(os.path.join(src, "Data/com.apple.CoreML/weights/weight.bin"))
+        dst_size = os.path.getsize(os.path.join(dst, "Data/com.apple.CoreML/weights/weight.bin"))
+        print(f"    {src_size/1024/1024:.0f}MB → {dst_size/1024/1024:.0f}MB")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export Kokoro-82M to CoreML")
     parser.add_argument("--output-dir", default="./models_export")
@@ -897,6 +916,9 @@ def main():
         # Dynamic export — no ANE patches, no fixed padding
         export_dynamic(pipeline, model, set_phases_fn, args.output_dir,
                        verify=args.verify)
+
+        # Also export palettized variants for tracking
+        _export_palettized(args.output_dir)
 
     print(f"\nDone. Models in {args.output_dir}/")
 

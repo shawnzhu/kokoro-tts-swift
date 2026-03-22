@@ -215,7 +215,7 @@ def print_results(results):
 # HTML report
 # ---------------------------------------------------------------------------
 
-def generate_html(results, audio_dir, commit):
+def generate_html(results, audio_dir, commit, pal_results=None):
     valid = [r for r in results if "error" not in r and r["name"] != "WORST"]
     worst = next((r for r in results if r["name"] == "WORST"), None)
     lengths = list(TEST_SENTENCES.keys())
@@ -239,15 +239,39 @@ def generate_html(results, audio_dir, commit):
                  f'<td>{r["corr"]:.4f}</td><td>{r["p999"]:.4f}</td>'
                  f'<td>{r["spike_rate"]:.0f}</td><td class="ms">{r["speed_ms"]:.0f}ms</td></tr>\n')
 
+    # Palettized metrics rows
+    pal_rows = ""
+    has_pal = pal_results and len(pal_results) > 0
+    if has_pal:
+        for r in pal_results:
+            name = r["name"]
+            if r.get("error"):
+                pal_rows += f'<tr><td>{name}</td><td class="fail">FAIL</td>' + '<td>—</td>' * 4 + '</tr>\n'
+                continue
+            cls = status_class(r)
+            label = "PASS" if cls == "pass" else "FAIL"
+            pal_rows += (f'<tr><td>{"<strong>" + name + "</strong>" if name == "WORST" else name}</td>'
+                         f'<td class="{cls}">{label}</td>'
+                         f'<td>{r["corr"]:.4f}</td><td>{r["p999"]:.4f}</td>'
+                         f'<td>{r["spike_rate"]:.0f}</td><td class="ms">{r["speed_ms"]:.0f}ms</td></tr>\n')
+
     # Audio comparison rows for benchmark voice
+    audio_header = '<tr><th>Length</th><th>Vanilla PyTorch</th><th>CoreML Float32</th>'
+    if has_pal:
+        audio_header += '<th>CoreML Palettized</th>'
+    audio_header += '</tr>\n'
+
     audio_rows = ""
     for label in lengths:
         desc = TEST_SENTENCES[label][:40] + ("..." if len(TEST_SENTENCES[label]) > 40 else "")
         audio_rows += (
             f'<tr><td>{label}<br><span class="ms">{desc}</span></td>\n'
             f'<td><audio controls src="{BENCHMARK_VOICE}_{label}_vanilla_pytorch.wav"></audio></td>\n'
-            f'<td><audio controls src="{BENCHMARK_VOICE}_{label}_coreml.wav"></audio></td></tr>\n'
+            f'<td><audio controls src="{BENCHMARK_VOICE}_{label}_coreml.wav"></audio></td>\n'
         )
+        if has_pal:
+            audio_rows += f'<td><audio controls src="{BENCHMARK_VOICE}_{label}_pal8.wav"></audio></td>\n'
+        audio_rows += '</tr>\n'
 
     # Multi-voice rows
     voice_rows = ""
@@ -257,36 +281,44 @@ def generate_html(results, audio_dir, commit):
             cells += f'<td><audio controls src="{voice}_{label}_coreml.wav"></audio></td>'
         voice_rows += f"<tr>{cells}</tr>\n"
 
+    pal_section = ""
+    if has_pal:
+        pal_section = f"""
+<h2>Palettized 8-bit Quality Metrics</h2>
+<table>
+<tr><th>Test</th><th>Status</th><th>Correlation</th><th>p99.9</th><th>Spikes/s</th><th>Speed</th></tr>
+{pal_rows}</table>
+"""
+
     html = f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
 <title>Stage Harness Results — {commit}</title>
 <style>
-body{{font-family:-apple-system,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;background:#1a1a2e;color:#e0e0e0}}
+body{{font-family:-apple-system,sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;background:#1a1a2e;color:#e0e0e0}}
 h1{{color:#c4b5fd}}h2{{color:#818cf8;margin-top:2em}}
 table{{border-collapse:collapse;width:100%;margin:1em 0}}
 th,td{{padding:8px 12px;text-align:left;border-bottom:1px solid #333}}
 th{{color:#67e8f9;font-size:.85em;text-transform:uppercase}}
 .pass{{color:#34d399}}.fail{{color:#f87171}}
 .ms{{font-family:monospace;color:#a78bfa;font-size:.85em}}
-audio{{width:260px;height:32px}}
+audio{{width:220px;height:32px}}
 .meta{{color:#888;font-size:.9em}}
 </style>
 </head><body>
 <h1>Stage Harness Results</h1>
 <p class="meta">Commit: {commit} &bull; Voice: {BENCHMARK_VOICE} &bull; Thresholds: corr &ge; {THRESH_CORR}, spikes &le; {THRESH_SPIKES}/s, speed &le; {THRESH_SPEED_MS}ms</p>
 
-<h2>Quality Metrics</h2>
+<h2>Float32 Quality Metrics</h2>
 <table>
 <tr><th>Test</th><th>Status</th><th>Correlation</th><th>p99.9</th><th>Spikes/s</th><th>Speed</th></tr>
 {rows}</table>
-
+{pal_section}
 <h2>Audio Comparison ({BENCHMARK_VOICE})</h2>
 <table>
-<tr><th>Length</th><th>Vanilla PyTorch</th><th>CoreML</th></tr>
-{audio_rows}</table>
+{audio_header}{audio_rows}</table>
 
-<h2>Multi-Voice Samples (CoreML)</h2>
+<h2>Multi-Voice Samples (CoreML Float32)</h2>
 <table>
 <tr><th>Voice</th>{"".join(f"<th>{l}</th>" for l in lengths)}</tr>
 {voice_rows}</table>
@@ -410,8 +442,51 @@ def main():
             except Exception:
                 pass
 
+    # Palettized model comparison (if available)
+    pal_results = []
+    pal_fe_path = os.path.join(export_dir, "kokoro_frontend_pal8.mlpackage")
+    pal_be_path = os.path.join(export_dir, "kokoro_backend_pal8.mlpackage")
+
+    if os.path.exists(pal_fe_path) and os.path.exists(pal_be_path):
+        print("\nTesting palettized models...")
+        fe_pal = ct.models.MLModel(pal_fe_path, compute_units=ct.ComputeUnit.CPU_ONLY)
+        _pal_be = {}
+        def _load_pal_be():
+            _pal_be['m'] = ct.models.MLModel(pal_be_path, compute_units=ct.ComputeUnit.ALL)
+        t = threading.Thread(target=_load_pal_be); t.start(); t.join()
+        be_pal = _pal_be['m']
+
+        for label, text in TEST_SENTENCES.items():
+            token_ids = _tokenize(text, pipeline)
+            ref_s = voice_pack[len(token_ids)]
+            try:
+                py_audio = run_patched_pytorch(model, set_phases_fn, token_ids, ref_s)
+                cm_audio, speed_s = run_coreml(fe_pal, be_pal, token_ids, ref_s)
+                metrics = compare(py_audio, cm_audio)
+                pal_results.append({
+                    "name": label, "corr": metrics["corr"], "p999": metrics["p999"],
+                    "spike_rate": metrics["spike_rate"], "speed_ms": speed_s * 1000,
+                })
+                sf.write(os.path.join(audio_dir, f"{BENCHMARK_VOICE}_{label}_pal8.wav"),
+                         cm_audio, 24000)
+            except Exception as e:
+                pal_results.append({"name": label, "error": str(e)[:80]})
+
+        pal_valid = [r for r in pal_results if "error" not in r]
+        if pal_valid:
+            pal_results.append({
+                "name": "WORST",
+                "corr": min(r["corr"] for r in pal_valid),
+                "p999": max(r["p999"] for r in pal_valid),
+                "spike_rate": max(r["spike_rate"] for r in pal_valid),
+                "speed_ms": max(r["speed_ms"] for r in pal_valid),
+            })
+        print("\nPalettized 8-bit:")
+        print_results(pal_results)
+
+    print("\nFloat32:")
     print_results(results)
-    generate_html(results, audio_dir, commit)
+    generate_html(results, audio_dir, commit, pal_results=pal_results)
     print(f"\nAudio saved to: {audio_dir}")
 
     shutil.rmtree(export_dir, ignore_errors=True)
