@@ -11,6 +11,7 @@ Usage:
     .venv/bin/python scripts/export_coreml.py --bucket kokoro_21_5s
 """
 import argparse
+import json
 import math
 import os
 import subprocess
@@ -469,6 +470,40 @@ def _tokenize(text, pipeline):
     return [0] + raw + [0]
 
 
+def _quantize_int8(model, label):
+    """Apply int8 linear symmetric weight quantization to a CoreML model."""
+    import coremltools.optimize.coreml as cto
+    config = cto.OptimizationConfig(
+        global_config=cto.OpLinearQuantizerConfig(mode="linear_symmetric", dtype="int8")
+    )
+    print(f"  Quantizing {label} weights to int8...")
+    return cto.linear_quantize_weights(model, config)
+
+
+def convert_voices_to_binary(voice_dir, output_dir):
+    """Convert voice JSON files to float32 binary format (~5x smaller)."""
+    import struct
+    os.makedirs(output_dir, exist_ok=True)
+    for fname in sorted(os.listdir(voice_dir)):
+        if not fname.endswith(".json"):
+            continue
+        with open(os.path.join(voice_dir, fname)) as f:
+            data = json.load(f)
+        dim = len(data["embedding"])
+        keys = {}
+        for k, v in data.items():
+            key_id = 0 if k == "embedding" else int(k)
+            keys[key_id] = np.array(v, dtype=np.float32)
+        outpath = os.path.join(output_dir, fname.replace(".json", ".bin"))
+        with open(outpath, "wb") as f:
+            f.write(struct.pack("<HH", len(keys), dim))
+            for key_id in sorted(keys.keys()):
+                f.write(struct.pack("<H", key_id))
+                f.write(keys[key_id].tobytes())
+    count = len([f for f in os.listdir(output_dir) if f.endswith(".bin")])
+    print(f"  Converted {count} voice files to binary")
+
+
 def export_bucket(pipeline, model, set_phases_fn, bucket_name, bucket_config,
                   output_dir, verify=False):
     max_tokens = bucket_config["max_tokens"]
@@ -524,6 +559,7 @@ def export_bucket(pipeline, model, set_phases_fn, bucket_name, bucket_config,
         convert_to="mlprogram",
     )
 
+    fe_model = _quantize_int8(fe_model, "frontend")
     fe_pkg = os.path.join(output_dir, f"{bucket_name}_frontend.mlpackage")
     fe_model.save(fe_pkg)
     print(f"  Saved {fe_pkg}")
@@ -582,6 +618,7 @@ def export_bucket(pipeline, model, set_phases_fn, bucket_name, bucket_config,
     _t.join()
     be_model = _be_result["model"]
 
+    be_model = _quantize_int8(be_model, "backend")
     be_pkg = os.path.join(output_dir, f"{bucket_name}_backend.mlpackage")
     be_model.save(be_pkg)
     print(f"  Saved {be_pkg}")

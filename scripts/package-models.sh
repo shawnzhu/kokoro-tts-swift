@@ -16,10 +16,8 @@ echo "Packaging models from: $MODEL_DIR"
 
 cd "$MODEL_DIR"
 tar czf "$OLDPWD/$OUTPUT" \
-    kokoro_21_5s_frontend.mlmodelc \
-    kokoro_21_5s_backend.mlmodelc \
-    kokoro_24_10s_frontend.mlmodelc \
-    kokoro_24_10s_backend.mlmodelc \
+    kokoro_frontend.mlmodelc \
+    kokoro_backend.mlmodelc \
     voices
 
 cd "$OLDPWD"
@@ -27,4 +25,4 @@ SIZE=$(du -h "$OUTPUT" | cut -f1)
 echo "Created $OUTPUT ($SIZE)"
 echo ""
 echo "Upload with:"
-echo "  gh release create models-v1 $OUTPUT --repo Jud/kokoro-coreml --title 'Model weights' --notes 'Kokoro-82M CoreML models and voice embeddings'"
+echo "  gh release create models-v1 $OUTPUT --repo Jud/kokoro-coreml --title 'Model weights' --notes 'Kokoro-82M CoreML models (int8) and voice embeddings (float32 binary)'"

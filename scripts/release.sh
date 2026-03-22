@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Release script for KokoroCoreML CoreML models.
 #
-# Exports PyTorch → CoreML, compiles, packages with voice data,
-# and uploads as a GitHub release with a date-based tag.
+# Exports PyTorch → CoreML (int8 quantized), converts voices to binary,
+# compiles, packages, and uploads as a GitHub release.
 #
 # Usage:
 #   ./scripts/release.sh              # tag: models-YYYY-MM-DD
@@ -18,9 +18,9 @@ TARBALL="kokoro-models.tar.gz"
 
 echo "=== KokoroCoreML Release: $TAG ==="
 
-# 1. Export CoreML models
+# 1. Export CoreML models (includes int8 quantization)
 echo ""
-echo "Step 1: Exporting CoreML models..."
+echo "Step 1: Exporting CoreML models (int8 quantized)..."
 PYTHONPATH=scripts .venv/bin/python scripts/export_coreml.py --output-dir "$EXPORT_DIR"
 
 # 2. Compile to .mlmodelc
@@ -38,17 +38,42 @@ for pkg in "$EXPORT_DIR"/*.mlpackage; do
     fi
 done
 
-# 3. Download voice data if not present
+# 3. Voice data — convert JSON to binary if needed
 VOICE_DIR="$EXPORT_DIR/voices"
 if [ ! -d "$VOICE_DIR" ]; then
-    echo ""
-    echo "Step 3: Voice data not found in $EXPORT_DIR/voices"
-    echo "  Copy voice embeddings from your model directory:"
-    echo "    cp -r ~/Library/Application\\ Support/kokoro-coreml/models/kokoro/voices $EXPORT_DIR/"
-    exit 1
+    # Look for JSON voices in the model directory
+    JSON_VOICE_DIR="$HOME/Library/Application Support/kokoro-coreml/models/kokoro/voices"
+    if [ ! -d "$JSON_VOICE_DIR" ]; then
+        JSON_VOICE_DIR="$HOME/Library/Application Support/kokoro-tts/models/kokoro/voices"
+    fi
+    if [ -d "$JSON_VOICE_DIR" ]; then
+        echo ""
+        echo "Step 3: Converting voice embeddings to binary..."
+        PYTHONPATH=scripts .venv/bin/python -c "
+from export_coreml import convert_voices_to_binary
+convert_voices_to_binary('$JSON_VOICE_DIR', '$VOICE_DIR')
+"
+    else
+        echo ""
+        echo "Step 3: Voice data not found"
+        echo "  Copy voice embeddings from your model directory:"
+        echo "    cp -r ~/Library/Application\\ Support/kokoro-coreml/models/kokoro/voices $EXPORT_DIR/"
+        exit 1
+    fi
 else
-    echo ""
-    echo "Step 3: Voice data present ($(ls "$VOICE_DIR" | wc -l | tr -d ' ') voices)"
+    # If voices dir exists but has JSON files, convert them
+    if ls "$VOICE_DIR"/*.json >/dev/null 2>&1; then
+        echo ""
+        echo "Step 3: Converting voice embeddings to binary..."
+        PYTHONPATH=scripts .venv/bin/python -c "
+from export_coreml import convert_voices_to_binary
+convert_voices_to_binary('$VOICE_DIR', '$VOICE_DIR')
+"
+        rm -f "$VOICE_DIR"/*.json
+    else
+        echo ""
+        echo "Step 3: Voice data present ($(ls "$VOICE_DIR"/*.bin 2>/dev/null | wc -l | tr -d ' ') voices)"
+    fi
 fi
 
 # 4. Package
@@ -56,10 +81,8 @@ echo ""
 echo "Step 4: Packaging..."
 cd "$EXPORT_DIR"
 tar czf "../$TARBALL" \
-    kokoro_21_5s_frontend.mlmodelc \
-    kokoro_21_5s_backend.mlmodelc \
-    kokoro_24_10s_frontend.mlmodelc \
-    kokoro_24_10s_backend.mlmodelc \
+    kokoro_frontend.mlmodelc \
+    kokoro_backend.mlmodelc \
     voices
 cd ..
 
@@ -77,7 +100,7 @@ else
     gh release create "$TAG" "$TARBALL" \
         --repo "$REPO" \
         --title "Models ($TAG)" \
-        --notes "Kokoro-82M CoreML models and voice embeddings."
+        --notes "Kokoro-82M CoreML models (int8 quantized) and voice embeddings (float32 binary)."
     echo "  ✓ https://github.com/$REPO/releases/tag/$TAG"
 fi
 

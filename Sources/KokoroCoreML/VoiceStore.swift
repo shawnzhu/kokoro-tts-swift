@@ -1,12 +1,16 @@
 import Foundation
 
-/// Loads and caches voice style embeddings from JSON files.
+/// Loads and caches voice style embeddings from binary (.bin) or JSON files.
 ///
-/// Each voice file contains a generic 256-dim embedding plus length-indexed
-/// embeddings keyed by token count ("1", "2", ..., "510"). The reference
-/// implementation selects `pack[len(ps)-1]` — the embedding calibrated for
-/// the specific input token count. Using the wrong embedding (especially
-/// the generic one for short inputs) produces garbled audio.
+/// Each voice contains a generic 256-dim embedding plus length-indexed
+/// embeddings keyed by token count (1–510). The reference implementation
+/// selects `pack[len(ps)-1]` — the embedding calibrated for the specific
+/// input token count.
+///
+/// Binary format (preferred, ~5x smaller than JSON):
+///   Header: num_keys (UInt16 LE), dim (UInt16 LE)
+///   Entries: key_id (UInt16 LE) + dim × Float32 LE values, sorted by key_id
+///   Key 0 = generic embedding, keys 1–510 = length-indexed.
 final class VoiceStore: Sendable {
     /// Voice name → length-indexed embeddings. Key 0 is the generic fallback.
     private let voicePacks: [String: VoicePack]
@@ -28,8 +32,11 @@ final class VoiceStore: Sendable {
         var loaded: [String: VoicePack] = [:]
 
         let files = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-        for file in files where file.pathExtension == "json" {
+        for file in files {
+            let ext = file.pathExtension
+            guard ext == "bin" || ext == "json" else { continue }
             let voiceName = file.deletingPathExtension().lastPathComponent
+            guard loaded[voiceName] == nil else { continue }  // .bin takes priority by sort order
             if let pack = try? Self.loadVoicePack(from: file) {
                 loaded[voiceName] = pack
             }
@@ -64,6 +71,57 @@ final class VoiceStore: Sendable {
     // MARK: - Private
 
     private static func loadVoicePack(from url: URL) throws -> VoicePack {
+        if url.pathExtension == "bin" {
+            return try loadBinaryVoicePack(from: url)
+        }
+        return try loadJSONVoicePack(from: url)
+    }
+
+    private static func loadBinaryVoicePack(from url: URL) throws -> VoicePack {
+        let data = try Data(contentsOf: url)
+        guard data.count >= 4 else {
+            throw KokoroError.modelLoadFailed("Voice file too small: \(url.lastPathComponent)")
+        }
+
+        let numKeys = Int(data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self).littleEndian })
+        let dim = Int(data.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self).littleEndian })
+        let entrySize = 2 + dim * 4  // UInt16 key + dim × Float32
+
+        guard data.count >= 4 + numKeys * entrySize else {
+            throw KokoroError.modelLoadFailed("Voice file truncated: \(url.lastPathComponent)")
+        }
+
+        var generic: [Float]?
+        var entries: [(Int, [Float])] = []
+
+        data.withUnsafeBytes { buf in
+            for i in 0..<numKeys {
+                let offset = 4 + i * entrySize
+                let keyId = Int(buf.load(fromByteOffset: offset, as: UInt16.self).littleEndian)
+                var vec = [Float](repeating: 0, count: dim)
+                for j in 0..<dim {
+                    let bits = buf.load(fromByteOffset: offset + 2 + j * 4, as: UInt32.self).littleEndian
+                    vec[j] = Float(bitPattern: bits)
+                }
+                if keyId == 0 {
+                    generic = vec
+                } else {
+                    entries.append((keyId, vec))
+                }
+            }
+        }
+
+        guard let genericVec = generic else {
+            throw KokoroError.modelLoadFailed("Missing generic embedding: \(url.lastPathComponent)")
+        }
+
+        var indexed = [[Float]?](repeating: nil, count: (entries.map(\.0).max() ?? -1) + 1)
+        for (idx, vec) in entries { indexed[idx] = vec }
+
+        return VoicePack(generic: genericVec, indexed: indexed)
+    }
+
+    private static func loadJSONVoicePack(from url: URL) throws -> VoicePack {
         let data = try Data(contentsOf: url)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let generic = json["embedding"] as? [Double],
@@ -75,8 +133,6 @@ final class VoiceStore: Sendable {
 
         let genericFloat = generic.prefix(styleDim).map { Float($0) }
 
-        // Load length-indexed embeddings ("1", "2", ..., "510").
-        // Find max key first, then build a flat array for O(1) lookup.
         var entries: [(Int, [Float])] = []
         for (key, value) in json {
             guard let idx = Int(key), let arr = value as? [Double], arr.count >= styleDim else {

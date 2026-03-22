@@ -136,9 +136,12 @@ def export_dynamic(output_dir):
 # CoreML inference
 # ---------------------------------------------------------------------------
 
-def run_coreml(fe_model, be_model, token_ids, ref_s):
+def run_coreml(fe_model, be_model, token_ids, ref_s, *, fp16_voices=False):
     n = len(token_ids)
     ref_s_np = ref_s.detach().numpy().astype(np.float32)
+    # Simulate float16 voice embedding precision loss (as stored in .bin files)
+    if fp16_voices:
+        ref_s_np = ref_s_np.astype(np.float16).astype(np.float32)
 
     fe_out = fe_model.predict({
         "input_ids": np.array([token_ids], dtype=np.int32),
@@ -349,8 +352,9 @@ def main():
             # Patched PyTorch reference (same model, same inputs)
             py_audio = run_patched_pytorch(model, set_phases_fn, token_ids, ref_s)
 
-            # CoreML
-            cm_audio, speed_s = run_coreml(fe_model, be_model, token_ids, ref_s)
+            # CoreML (with float16 voice embeddings, matching .bin format)
+            cm_audio, speed_s = run_coreml(fe_model, be_model, token_ids, ref_s,
+                                           fp16_voices=False)
 
             metrics = compare(py_audio, cm_audio)
             results.append({
@@ -399,7 +403,8 @@ def main():
             token_ids = [0] + raw + [0]
             ref_s = vp[len(token_ids)]
             try:
-                cm_audio, _ = run_coreml(fe_model, be_model, token_ids, ref_s)
+                cm_audio, _ = run_coreml(fe_model, be_model, token_ids, ref_s,
+                                        fp16_voices=False)
                 sf.write(os.path.join(audio_dir, f"{voice}_{label}_coreml.wav"),
                          cm_audio, 24000)
             except Exception:
