@@ -193,7 +193,7 @@ def run_coreml(fe_model, be_model, token_ids, ref_s):
 def compare(py_audio, cm_audio):
     ml = min(len(py_audio), len(cm_audio))
     if ml == 0:
-        return {"corr": 0, "p999": 0, "spike_rate": 0}
+        return {"corr": 0, "p999": 0, "spike_rate": 0, "spec_corr": 0}
     py = py_audio[:ml].astype(np.float64)
     cm = cm_audio[:ml].astype(np.float64)
     corr = float(np.corrcoef(py, cm)[0, 1]) if np.std(py) > 1e-10 else 0.0
@@ -201,26 +201,36 @@ def compare(py_audio, cm_audio):
     p999 = float(np.percentile(abs_diff, 99.9))
     spikes = int(np.sum(abs_diff > 0.05))
     spike_rate = spikes / (ml / 24000.0) if ml > 0 else 0
-    return {"corr": corr, "p999": p999, "spike_rate": spike_rate}
+
+    # Log-spectrogram correlation (phase-invariant perceptual metric)
+    from scipy.signal import stft
+    _, _, Zpy = stft(py, fs=24000, nperseg=1024, noverlap=768)
+    _, _, Zcm = stft(cm, fs=24000, nperseg=1024, noverlap=768)
+    log_py = np.log1p(np.abs(Zpy)).flatten()
+    log_cm = np.log1p(np.abs(Zcm)).flatten()
+    spec_corr = float(np.corrcoef(log_py, log_cm)[0, 1]) if np.std(log_py) > 1e-10 else 0.0
+
+    return {"corr": corr, "p999": p999, "spike_rate": spike_rate, "spec_corr": spec_corr}
 
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
 def print_results(results):
-    w = 62
+    w = 74
     print(f"\n{'='*w}")
-    print(f"{'Test':<24} {'':>4} {'Corr':>7} {'p99.9':>7} {'Spk/s':>6} {'Speed':>6}")
+    print(f"{'Test':<20} {'':>4} {'Corr':>7} {'Spec':>7} {'p99.9':>7} {'Spk/s':>6} {'Speed':>6}")
     print(f"{'-'*w}")
     for r in results:
         name = r["name"]
         if r.get("error"):
-            print(f"{name:<24} FAIL {'':>7} {'':>7} {'':>6} {'':>6}")
+            print(f"{name:<20} FAIL {'':>7} {'':>7} {'':>7} {'':>6} {'':>6}")
             continue
         corr, p999, sr = r["corr"], r["p999"], r["spike_rate"]
+        spec = r.get("spec_corr", 0)
         speed_ms = r["speed_ms"]
         flag = "PASS" if corr >= THRESH_CORR and sr <= THRESH_SPIKES and speed_ms <= THRESH_SPEED_MS else "FAIL"
-        print(f"{name:<24} {flag:>4} {corr:>7.4f} {p999:>7.4f} {sr:>6.0f} {speed_ms:>4.0f}ms")
+        print(f"{name:<20} {flag:>4} {corr:>7.4f} {spec:>7.4f} {p999:>7.4f} {sr:>6.0f} {speed_ms:>4.0f}ms")
     print(f"{'='*w}")
 
 # ---------------------------------------------------------------------------
@@ -238,34 +248,26 @@ def generate_html(results, audio_dir, commit, pal_results=None):
         return "pass" if (r["corr"] >= THRESH_CORR and r["spike_rate"] <= THRESH_SPIKES
                           and r["speed_ms"] <= THRESH_SPEED_MS) else "fail"
 
-    rows = ""
-    for r in results:
-        name = r["name"]
-        if r.get("error"):
-            rows += f'<tr><td>{name}</td><td class="fail">FAIL</td>' + '<td>—</td>' * 4 + '</tr>\n'
-            continue
-        cls = status_class(r)
-        label = "PASS" if cls == "pass" else "FAIL"
-        rows += (f'<tr><td>{"<strong>" + name + "</strong>" if name == "WORST" else name}</td>'
-                 f'<td class="{cls}">{label}</td>'
-                 f'<td>{r["corr"]:.4f}</td><td>{r["p999"]:.4f}</td>'
-                 f'<td>{r["spike_rate"]:.0f}</td><td class="ms">{r["speed_ms"]:.0f}ms</td></tr>\n')
-
-    # Palettized metrics rows
-    pal_rows = ""
-    has_pal = pal_results and len(pal_results) > 0
-    if has_pal:
-        for r in pal_results:
+    def _metrics_rows(result_list):
+        out = ""
+        for r in result_list:
             name = r["name"]
             if r.get("error"):
-                pal_rows += f'<tr><td>{name}</td><td class="fail">FAIL</td>' + '<td>—</td>' * 4 + '</tr>\n'
+                out += f'<tr><td>{name}</td><td class="fail">FAIL</td>' + '<td>—</td>' * 5 + '</tr>\n'
                 continue
             cls = status_class(r)
             label = "PASS" if cls == "pass" else "FAIL"
-            pal_rows += (f'<tr><td>{"<strong>" + name + "</strong>" if name == "WORST" else name}</td>'
-                         f'<td class="{cls}">{label}</td>'
-                         f'<td>{r["corr"]:.4f}</td><td>{r["p999"]:.4f}</td>'
-                         f'<td>{r["spike_rate"]:.0f}</td><td class="ms">{r["speed_ms"]:.0f}ms</td></tr>\n')
+            spec = r.get("spec_corr", 0)
+            out += (f'<tr><td>{"<strong>" + name + "</strong>" if name == "WORST" else name}</td>'
+                    f'<td class="{cls}">{label}</td>'
+                    f'<td>{r["corr"]:.4f}</td><td>{spec:.4f}</td><td>{r["p999"]:.4f}</td>'
+                    f'<td>{r["spike_rate"]:.0f}</td><td class="ms">{r["speed_ms"]:.0f}ms</td></tr>\n')
+        return out
+
+    rows = _metrics_rows(results)
+
+    has_pal = pal_results and len(pal_results) > 0
+    pal_rows = _metrics_rows(pal_results) if has_pal else ""
 
     # Audio comparison rows for benchmark voice
     audio_header = '<tr><th>Length</th><th>Vanilla PyTorch</th><th>CoreML Float32</th>'
@@ -298,7 +300,7 @@ def generate_html(results, audio_dir, commit, pal_results=None):
         pal_section = f"""
 <h2>Palettized 8-bit Quality Metrics</h2>
 <table>
-<tr><th>Test</th><th>Status</th><th>Correlation</th><th>p99.9</th><th>Spikes/s</th><th>Speed</th></tr>
+<tr><th>Test</th><th>Status</th><th>Waveform</th><th>Spectral</th><th>p99.9</th><th>Spk/s</th><th>Speed</th></tr>
 {pal_rows}</table>
 """
 
@@ -323,7 +325,7 @@ audio{{width:220px;height:32px}}
 
 <h2>Float32 Quality Metrics</h2>
 <table>
-<tr><th>Test</th><th>Status</th><th>Correlation</th><th>p99.9</th><th>Spikes/s</th><th>Speed</th></tr>
+<tr><th>Test</th><th>Status</th><th>Waveform</th><th>Spectral</th><th>p99.9</th><th>Spk/s</th><th>Speed</th></tr>
 {rows}</table>
 {pal_section}
 <h2>Audio Comparison ({BENCHMARK_VOICE})</h2>
@@ -367,8 +369,9 @@ def _benchmark_variant(name, fe, be, pipeline, model, set_phases_fn, voice_pack,
             cm_audio, speed_s = run_coreml(fe, be, token_ids, ref_s)
             metrics = compare(py_audio, cm_audio)
             results.append({
-                "name": label, "corr": metrics["corr"], "p999": metrics["p999"],
-                "spike_rate": metrics["spike_rate"], "speed_ms": speed_s * 1000,
+                "name": label, "corr": metrics["corr"], "spec_corr": metrics["spec_corr"],
+                "p999": metrics["p999"], "spike_rate": metrics["spike_rate"],
+                "speed_ms": speed_s * 1000,
             })
             sf.write(os.path.join(audio_dir, f"{BENCHMARK_VOICE}_{label}_{name}.wav"),
                      cm_audio, 24000)
@@ -384,6 +387,7 @@ def _benchmark_variant(name, fe, be, pipeline, model, set_phases_fn, voice_pack,
         results.append({
             "name": "WORST",
             "corr": min(r["corr"] for r in valid),
+            "spec_corr": min(r["spec_corr"] for r in valid),
             "p999": max(r["p999"] for r in valid),
             "spike_rate": max(r["spike_rate"] for r in valid),
             "speed_ms": max(r["speed_ms"] for r in valid),
