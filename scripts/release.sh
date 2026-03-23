@@ -106,14 +106,23 @@ cd ..
 SIZE=$(du -h "$TARBALL" | cut -f1)
 echo "  Created $TARBALL ($SIZE)"
 
-# 6. Upload
+# 6. Verify against vanilla PyTorch
+echo ""
+echo "Step 6: Verifying release models against vanilla PyTorch..."
+PYTHONPATH=scripts .venv/bin/python scripts/verify_release.py --model-dir "$EXPORT_DIR"
+if [ $? -ne 0 ]; then
+    echo "  ✗ Verification failed — aborting release"
+    exit 1
+fi
+
+# 7. Upload
 if [ "$DRY_RUN" = "--dry-run" ]; then
     echo ""
     echo "Dry run — skipping upload. To upload manually:"
     echo "  gh release create $TAG $TARBALL --repo $REPO --title 'Models ($TAG)'"
 else
     echo ""
-    echo "Step 6: Uploading to GitHub release $TAG..."
+    echo "Step 7: Uploading to GitHub release $TAG..."
     gh release create "$TAG" "$TARBALL" \
         --repo "$REPO" \
         --title "Models ($TAG)" \
