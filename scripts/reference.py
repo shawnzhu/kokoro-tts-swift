@@ -1,8 +1,8 @@
-"""PyTorch reference implementations — DO NOT MODIFY.
+"""PyTorch reference implementations for CoreML export.
 
-These define the ground truth for CoreML fidelity comparison.
 CustomSTFT replaces the original STFT with a conv1d-based version.
 patch_sinegen_for_export makes the model deterministic for testing.
+patch_sinegen_for_production keeps natural randomness for release.
 
 Imported by both export_coreml.py and stage_harness.py.
 """
@@ -184,6 +184,38 @@ def patch_sinegen_for_export(model):
         for m in module.modules():
             if isinstance(m, OriginalSineGen):
                 m._external_phases = torch.zeros_like(phases)
+
+    return set_phases
+
+
+def patch_sinegen_for_production(model):
+    """Apply CoreML-compatible SineGen but keep natural vocoder randomness.
+
+    Same structural patches as patch_sinegen_for_export (CustomSTFT-compatible
+    _f02sine, Snake pow→mul) but preserves the noise component and passes
+    random phases through instead of zeroing them.
+    """
+    from kokoro.istftnet import SineGen as OriginalSineGen
+
+    OriginalSineGen._f02sine = SineGen._f02sine
+
+    def _noise_forward(self, f0):
+        fn = torch.multiply(f0, torch.FloatTensor(
+            [[range(1, self.harmonic_num + 2)]]).to(f0.device))
+        sine_waves = self._f02sine(fn) * self.sine_amp
+        uv = self._f02uv(f0)
+        noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
+        noise = noise_amp * torch.randn_like(sine_waves)
+        sine_waves = sine_waves * uv + noise
+        return sine_waves, uv, noise
+    OriginalSineGen.forward = _noise_forward
+
+    _patch_snake_mul(model)
+
+    def set_phases(module, phases):
+        for m in module.modules():
+            if isinstance(m, OriginalSineGen):
+                m._external_phases = phases
 
     return set_phases
 

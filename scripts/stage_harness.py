@@ -126,7 +126,7 @@ def generate_vanilla_reference(voice, sentences, output_dir):
 def export_dynamic(output_dir):
     result = subprocess.run(
         [sys.executable, os.path.join(SCRIPT_DIR, "export_coreml.py"),
-         "--output-dir", output_dir, "--skip-palettize"],
+         "--output-dir", output_dir, "--deterministic", "--skip-palettize"],
         capture_output=True, text=True, cwd=SCRIPT_DIR, timeout=600,
     )
     if result.returncode != 0:

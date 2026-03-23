@@ -28,7 +28,8 @@ from coreml_ops import register_missing_torch_ops
 # CustomSTFT, SineGen, patch_sinegen_for_export, and patch_pack_padded_sequence
 # define the PyTorch reference. They live in reference.py (read-only).
 from reference import (  # noqa: F401 — re-exported for harness/other scripts
-    CustomSTFT, SineGen, patch_sinegen_for_export, patch_pack_padded_sequence,
+    CustomSTFT, SineGen, patch_sinegen_for_export, patch_sinegen_for_production,
+    patch_pack_padded_sequence,
 )
 
 register_missing_torch_ops()
@@ -884,6 +885,8 @@ def main():
     parser = argparse.ArgumentParser(description="Export Kokoro-82M to CoreML")
     parser.add_argument("--output-dir", default="./models_export")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Zero noise and phases for reproducible testing (harness mode)")
     parser.add_argument("--skip-palettize", action="store_true",
                         help="Skip palettized model export")
     args = parser.parse_args()
@@ -893,8 +896,12 @@ def main():
     print("Loading Kokoro model...")
     pipeline, model = load_kokoro_model()
 
-    print("Patching SineGen for CoreML...")
-    set_phases_fn = patch_sinegen_for_export(model)
+    if args.deterministic:
+        print("Patching SineGen for CoreML (deterministic — zeroed noise/phases)...")
+        set_phases_fn = patch_sinegen_for_export(model)
+    else:
+        print("Patching SineGen for CoreML (production — natural randomness)...")
+        set_phases_fn = patch_sinegen_for_production(model)
 
     # pack_padded_sequence no-op — needed for tracing (CoreML can't convert it),
     # but doesn't affect output when there's no padding (batch=1, no masked tokens)
