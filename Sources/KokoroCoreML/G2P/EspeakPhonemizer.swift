@@ -77,15 +77,16 @@
             .appendingPathComponent("kokoro-espeak")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-            try EspeakLib.ensureBundleInstalled(inRoot: root)
-
-            espeak_ng_InitializePath(root.path)
-
-            // Suppress "Can't read dictionary file" warnings from eSpeak init.
+            // Suppress stderr during bundle install and init — eSpeak logs
+            // "Can't read dictionary file" for every unsupported language.
             let savedStderr = dup(STDERR_FILENO)
             let devNull = open("/dev/null", O_WRONLY)
             dup2(devNull, STDERR_FILENO)
+
+            try EspeakLib.ensureBundleInstalled(inRoot: root)
+            espeak_ng_InitializePath(root.path)
             let status = espeak_ng_Initialize(nil)
+
             dup2(savedStderr, STDERR_FILENO)
             close(devNull)
             close(savedStderr)
@@ -120,24 +121,27 @@
         }
 
         private func phonemizeLine(_ line: String) -> String {
-            // Request IPA with tie characters (0x02 | 0x80)
             let textMode: Int32 = 1  // espeakCHARS_UTF8
             let phonemeMode: Int32 = 0x02 | 0x80  // espeakPHONEMES_IPA | espeakPHONEMES_TIE
 
-            var raw = ""
-            line.withCString { cString in
-                var ptr: UnsafePointer<CChar>? = cString
-                withUnsafeMutablePointer(to: &ptr) { mutablePtr in
-                    let rawPtr = mutablePtr.withMemoryRebound(
-                        to: UnsafeRawPointer?.self, capacity: 1
-                    ) { $0 }
-                    if let phonemes = espeak_TextToPhonemes(rawPtr, textMode, phonemeMode) {
-                        raw = String(cString: phonemes)
-                    }
+            // espeak_TextToPhonemes processes one clause per call (up to sentence
+            // end, comma, etc.), advancing the text pointer each time. We must
+            // loop until the pointer is set to NULL (end of text).
+            let cStr = strdup(line)!
+            defer { free(cStr) }
+            var textPtr: UnsafeRawPointer? = UnsafeRawPointer(cStr)
+            var parts: [String] = []
+
+            while textPtr != nil {
+                let phonemes = withUnsafeMutablePointer(to: &textPtr) { pp in
+                    espeak_TextToPhonemes(pp, textMode, phonemeMode)
                 }
+                guard let phonemes else { break }
+                let chunk = String(cString: phonemes).trimmingCharacters(in: .whitespaces)
+                if !chunk.isEmpty { parts.append(chunk) }
             }
 
-            return mapToKokoro(raw.trimmingCharacters(in: .whitespaces))
+            return mapToKokoro(parts.joined(separator: " "))
         }
 
         /// Map eSpeak IPA to Kokoro's phoneme set (Misaki E2M table).
