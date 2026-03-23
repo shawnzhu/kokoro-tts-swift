@@ -12,7 +12,7 @@
 
 ---
 
-**6-16x faster than real-time** on M-series. handles any length text -- automatic chunking, streaming, voice selection, speed control. Kokoro-82M via CoreML on Apple Silicon.
+**6-16x faster than real-time** on M-series. handles any length text -- automatic chunking, streaming, voice selection, speed control. Kokoro-82M via CoreML on Apple Silicon. ~99MB model download.
 
 ## install
 
@@ -26,11 +26,21 @@ brew install jud/kokoro-coreml/kokoro
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Jud/kokoro-coreml.git", from: "0.3.0"),
+    .package(url: "https://github.com/Jud/kokoro-coreml.git", from: "0.8.0"),
 ]
 ```
 
-models (~640MB) download automatically on first use.
+models (~99MB) download automatically on first use.
+
+### multilingual (optional, GPL-3.0)
+
+for French, Spanish, Italian, Portuguese, Hindi, and other languages via eSpeak-NG:
+
+```bash
+swift build --traits espeak
+```
+
+this enables `--language` in the CLI and `EspeakPhonemizer` in the library API. default builds remain Apache 2.0.
 
 ## three lines to speech
 
@@ -50,7 +60,7 @@ async streaming. audio chunks arrive as they're synthesized. playback starts imm
 ### synthesize
 
 ```swift
-let engine = try KokoroEngine(modelDirectory: modelPath)
+let engine = try KokoroEngine()
 let result = try engine.synthesize(text: "hello world", voice: "af_heart")
 // result.samples → 24kHz mono PCM float array
 // result.duration → audio length in seconds
@@ -89,6 +99,17 @@ skip the G2P pipeline entirely:
 let result = try engine.synthesize(ipa: "hˈɛloʊ wˈɜːld", voice: "af_heart")
 ```
 
+### multilingual (with eSpeak)
+
+```swift
+let phonemizer = try EspeakPhonemizer()
+let result = try engine.synthesize(
+    text: "bonjour le monde", voice: "ff_siwis",
+    phonemizer: phonemizer, language: "fr")
+```
+
+requires `--traits espeak` build flag. supports French, Spanish, Italian, Portuguese, Hindi, and more.
+
 ## the command line
 
 ```bash
@@ -103,6 +124,8 @@ kokoro daemon start   # keep models loaded, 3x faster repeat synthesis
 
 `--stream` starts playback as soon as the first chunk is ready. `--ipa` accepts IPA phonemes directly.
 
+with eSpeak enabled: `kokoro say --language fr -v ff_siwis "bonjour le monde"`
+
 ## performance
 
 | metric | value |
@@ -112,6 +135,7 @@ kokoro daemon start   # keep models loaded, 3x faster repeat synthesis
 | sample rate | 24kHz mono PCM |
 | voices | 54 distinct voices and accents |
 | speed control | 0.5x - 2.0x |
+| model download | ~99MB (8-bit palettized + binary voices) |
 
 ## how it works
 
@@ -127,9 +151,9 @@ graph LR
     F2 --> H[24kHz audio]
 ```
 
-text goes through an english G2P pipeline -- lexicon lookup, morphological stemming, number expansion. unknown words hit a fallback chain: CamelCase splitting, BART neural G2P, letter spelling as last resort.
+text goes through an english G2P pipeline -- lexicon lookup, morphological stemming, number expansion. unknown words hit a fallback chain: CamelCase splitting, BART neural G2P, letter spelling as last resort. optional eSpeak-NG phonemizer adds multilingual support.
 
-the engine uses a single dynamic CoreML model pair -- no fixed buckets. any length text gets chunked at sentence boundaries. `synthesize()` returns the full result. `speak()` streams chunks as `AsyncStream<SpeakEvent>`.
+the engine uses a single dynamic CoreML model pair with 8-bit palettized weights. any length text gets chunked at sentence boundaries. `synthesize()` returns the full result. `speak()` streams chunks as `AsyncStream<SpeakEvent>`.
 
 ## architecture
 
@@ -143,10 +167,10 @@ graph TD
     end
 
     subgraph "inference"
-        T5 --> I1[bucket selection]
+        T5 --> I1[dynamic CoreML models]
+        V[voice store] --> I1
         I1 --> I2[frontend: predictor + SineGen<br/>CPU]
-        V[voice store] --> I2
-        I2 --> I3[backend: decoder + iSTFTNet<br/>CoreML]
+        I2 --> I3[backend: decoder + iSTFTNet<br/>GPU]
         I3 --> I4[PCM samples]
     end
 
@@ -159,6 +183,7 @@ graph TD
 ## model
 
 - **architecture**: Kokoro-82M -- StyleTTS2 encoder + iSTFTNet vocoder
+- **weights**: 8-bit palettized (75% smaller than float32, perceptually identical)
 - **runtime**: CoreML -- frontend on CPU, backend on GPU via Apple Silicon
 - **sample rate**: 24kHz mono
 - **voices**: 54 style embeddings across american, british, and international accents
@@ -167,3 +192,5 @@ graph TD
 ## license
 
 Apache 2.0
+
+eSpeak-NG phonemizer (optional, behind `--traits espeak`) is GPL-3.0. default builds do not include it.
