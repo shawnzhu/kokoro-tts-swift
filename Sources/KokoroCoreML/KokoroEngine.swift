@@ -98,14 +98,20 @@ public final class KokoroEngine: @unchecked Sendable {
     private let synthesizeLock = NSLock()
     private let tokenizer: Tokenizer
     private let voiceStore: VoiceStore
-    private let frontend: MLModel
-    private let backend: MLModel
+    private var _frontend: MLModel?
+    private var _backend: MLModel?
+    private var _loadError: Error?
+    private let _loadCondition = NSCondition()
     private let _isReady = OSAllocatedUnfairLock(initialState: false)
 
     /// Whether the engine has completed background warmup.
     public var isReady: Bool { _isReady.withLock { $0 } }
 
     /// Creates a KokoroEngine from cached models.
+    ///
+    /// Returns immediately — models load and warm up in the background.
+    /// Synthesis calls block until loading completes. Check ``isReady``
+    /// to know when warmup is fully done.
     public init(modelDirectory: URL) throws {
         guard ModelManager.modelsAvailable(at: modelDirectory) else {
             throw KokoroError.modelsNotAvailable(modelDirectory)
@@ -123,24 +129,14 @@ public final class KokoroEngine: @unchecked Sendable {
         self.voiceStore = try VoiceStore(
             directory: modelDirectory.appendingPathComponent("voices"))
 
-        let feConfig = MLModelConfiguration()
-        feConfig.computeUnits = .cpuOnly
-        let beConfig = MLModelConfiguration()
-        beConfig.computeUnits = .all
+        let fePath = modelDirectory.appendingPathComponent("kokoro_frontend.mlmodelc")
+        let bePath = modelDirectory.appendingPathComponent("kokoro_backend.mlmodelc")
 
-        self.frontend = try MLModel(
-            contentsOf: modelDirectory.appendingPathComponent("kokoro_frontend.mlmodelc"),
-            configuration: feConfig)
-        self.backend = try MLModel(
-            contentsOf: modelDirectory.appendingPathComponent("kokoro_backend.mlmodelc"),
-            configuration: beConfig)
-
-        Self.logger.info("Loaded dynamic frontend+backend (max \(Self.maxTokens) tokens)")
+        Self.logger.info("Loading dynamic frontend+backend (max \(Self.maxTokens) tokens)")
 
         let engine = self
         let thread = Thread {
-            engine.warmUp()
-            engine._isReady.withLock { $0 = true }
+            engine.loadAndWarmUp(frontendURL: fePath, backendURL: bePath)
         }
         thread.stackSize = 8 * 1024 * 1024
         thread.start()
@@ -300,16 +296,144 @@ public final class KokoroEngine: @unchecked Sendable {
         voiceStore.availableVoices
     }
 
-    // MARK: - Warmup
+    // MARK: - Loading & Warmup
 
-    private func warmUp() {
+    /// Block until both models are loaded, or throw if loading failed.
+    private func awaitModels() throws -> (frontend: MLModel, backend: MLModel) {
+        _loadCondition.lock()
+        defer { _loadCondition.unlock() }
+        while _frontend == nil || _backend == nil {
+            if let error = _loadError { throw error }
+            _loadCondition.wait()
+        }
+        return (_frontend!, _backend!)
+    }
+
+    /// Load both models in parallel and warm each up.
+    ///
+    /// Timeline:
+    /// ```
+    /// Thread A: fe_load → fe_warmup ──────────── be_warmup → isReady
+    /// Thread B: be_load (GPU shader compile) ──┘
+    /// ```
+    /// Frontend warmup overlaps with backend GPU shader compilation.
+    private func loadAndWarmUp(frontendURL: URL, backendURL: URL) {
+        let feConfig = MLModelConfiguration()
+        feConfig.computeUnits = .cpuOnly
+        let beConfig = MLModelConfiguration()
+        beConfig.computeUnits = .all
+
+        // Start backend on a separate thread (GPU shader compilation is the slow part)
+        var loadedBE: MLModel?
+        var beError: Error?
+        let beSem = DispatchSemaphore(value: 0)
+
+        let beThread = Thread {
+            do {
+                loadedBE = try MLModel(contentsOf: backendURL, configuration: beConfig)
+            } catch {
+                beError = error
+            }
+            beSem.signal()
+        }
+        beThread.stackSize = 8 * 1024 * 1024
+        beThread.start()
+
+        // Load frontend on this thread
+        let loadedFE: MLModel
         do {
-            let dummyTokens = [0, 50, 1, 0]
-            let dummyStyle = [Float](repeating: 0, count: VoiceStore.styleDim)
-            _ = try synthesizeChunk(
-                tokenIds: dummyTokens, styleVector: dummyStyle, speed: 1.0)
+            loadedFE = try MLModel(contentsOf: frontendURL, configuration: feConfig)
         } catch {
-            Self.logger.warning("Warmup failed (non-fatal): \(error.localizedDescription)")
+            beSem.wait()
+            _loadCondition.lock()
+            _loadError = error
+            _loadCondition.broadcast()
+            _loadCondition.unlock()
+            return
+        }
+
+        // Frontend loaded — warm it while backend is still compiling
+        let feWarmupOutput = warmUpFrontend(loadedFE)
+
+        // Wait for backend
+        beSem.wait()
+
+        guard let be = loadedBE else {
+            _loadCondition.lock()
+            _loadError = beError ?? KokoroError.inferenceFailed("Backend load failed")
+            _loadCondition.broadcast()
+            _loadCondition.unlock()
+            return
+        }
+
+        // Publish models — unblocks any waiting synthesize() calls
+        _loadCondition.lock()
+        _frontend = loadedFE
+        _backend = be
+        _loadCondition.broadcast()
+        _loadCondition.unlock()
+
+        Self.logger.info("Models loaded, warming up backend...")
+
+        // Warm backend with real frontend output
+        if let output = feWarmupOutput {
+            warmUpBackend(be, frontendOutput: output)
+        }
+
+        _isReady.withLock { $0 = true }
+        Self.logger.info("Engine ready")
+    }
+
+    private func warmUpFrontend(_ model: MLModel) -> MLFeatureProvider? {
+        do {
+            let n = 4
+            let ids = [0, 50, 1, 0]
+            let inputIds = try MLMultiArray(shape: [1, n as NSNumber], dataType: .int32)
+            let mask = try MLMultiArray(shape: [1, n as NSNumber], dataType: .int32)
+            let refS = try MLMultiArray(
+                shape: [1, VoiceStore.styleDim as NSNumber], dataType: .float32)
+            let phases = try MLMultiArray(
+                shape: [1, Self.numPhases as NSNumber], dataType: .float32)
+            let speed = try MLMultiArray(shape: [1], dataType: .float32)
+
+            for i in 0..<n { inputIds[i] = ids[i] as NSNumber; mask[i] = 1 }
+            speed[0] = 1.0
+
+            let input = try MLDictionaryFeatureProvider(dictionary: [
+                Feature.inputIds: MLFeatureValue(multiArray: inputIds),
+                Feature.attentionMask: MLFeatureValue(multiArray: mask),
+                Feature.refS: MLFeatureValue(multiArray: refS),
+                Feature.speed: MLFeatureValue(multiArray: speed),
+                Feature.randomPhases: MLFeatureValue(multiArray: phases),
+            ])
+            return try model.prediction(from: input)
+        } catch {
+            Self.logger.warning("Frontend warmup failed (non-fatal): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func warmUpBackend(_ model: MLModel, frontendOutput: MLFeatureProvider) {
+        do {
+            guard let asr = frontendOutput.featureValue(for: Feature.asr)?.multiArrayValue,
+                let f0Pred = frontendOutput.featureValue(for: Feature.f0Pred)?.multiArrayValue,
+                let nPred = frontendOutput.featureValue(for: Feature.nPred)?.multiArrayValue,
+                let har = frontendOutput.featureValue(for: Feature.har)?.multiArrayValue
+            else { return }
+
+            let sContent = try MLMultiArray(
+                shape: [1, Self.sContentDim as NSNumber], dataType: .float32)
+
+            let input = try MLDictionaryFeatureProvider(dictionary: [
+                Feature.asr: MLFeatureValue(multiArray: asr),
+                Feature.f0Pred: MLFeatureValue(multiArray: f0Pred),
+                Feature.nPred: MLFeatureValue(multiArray: nPred),
+                Feature.sContent: MLFeatureValue(multiArray: sContent),
+                Feature.har: MLFeatureValue(multiArray: har),
+            ])
+            _ = try model.prediction(from: input)
+        } catch {
+            Self.logger.warning("Backend warmup failed (non-fatal): \(error.localizedDescription)")
         }
     }
 
@@ -417,6 +541,8 @@ public final class KokoroEngine: @unchecked Sendable {
             throw KokoroError.textTooLong(
                 tokenCount: tokenIds.count, maxTokens: Self.maxTokens)
         }
+
+        let (frontend, backend) = try awaitModels()
 
         synthesizeLock.lock()
         defer { synthesizeLock.unlock() }
